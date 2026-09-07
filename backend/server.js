@@ -3,51 +3,61 @@ const { URL } = require("url");
 
 const PORT = process.env.PORT || 3000;
 
-// Client ID хранится в Render → Environment
 const CLIENT_ID = process.env.YOOMONEY_CLIENT_ID;
 
 const REDIRECT_URI =
     "https://yoomoney-api.onrender.com/oauth/callback";
 
-function send(res, status, contentType, body) {
+function sendHTML(res, status, html) {
     res.writeHead(status, {
-        "Content-Type": contentType,
+        "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store"
     });
 
-    res.end(body);
+    res.end(html);
 }
 
-// Обмен OAuth code на access_token
-async function getAccessToken(code) {
+function sendText(res, status, text) {
+    res.writeHead(status, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store"
+    });
+
+    res.end(text);
+}
+
+async function exchangeCode(code) {
     if (!CLIENT_ID) {
         throw new Error(
-            "YOOMONEY_CLIENT_ID не настроен в Render"
+            "YOOMONEY_CLIENT_ID отсутствует в Render Environment"
         );
     }
 
-    const params = new URLSearchParams();
-
-    params.append("code", code);
-    params.append("client_id", CLIENT_ID);
-    params.append("grant_type", "authorization_code");
-    params.append("redirect_uri", REDIRECT_URI);
+    const body = new URLSearchParams({
+        code,
+        client_id: CLIENT_ID,
+        grant_type: "authorization_code",
+        redirect_uri: REDIRECT_URI
+    });
 
     const response = await fetch(
         "https://yoomoney.ru/oauth/token",
         {
             method: "POST",
-
             headers: {
                 "Content-Type":
                     "application/x-www-form-urlencoded"
             },
-
-            body: params.toString()
+            body: body.toString()
         }
     );
 
     const text = await response.text();
+
+    console.log(
+        "ЮMoney token HTTP status:",
+        response.status
+    );
 
     let data;
 
@@ -55,7 +65,7 @@ async function getAccessToken(code) {
         data = JSON.parse(text);
     } catch {
         throw new Error(
-            "ЮMoney вернул некорректный ответ"
+            "ЮMoney вернул неожиданный ответ"
         );
     }
 
@@ -63,17 +73,17 @@ async function getAccessToken(code) {
         throw new Error(
             data.error_description ||
             data.error ||
-            "Не удалось получить токен"
+            "Ошибка обмена code на token"
         );
     }
 
     if (!data.access_token) {
         throw new Error(
-            "ЮMoney не вернул access_token"
+            "В ответе ЮMoney отсутствует access_token"
         );
     }
 
-    return data.access_token;
+    return data;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -82,27 +92,26 @@ const server = http.createServer(async (req, res) => {
         `http://${req.headers.host || "localhost"}`
     );
 
-    // ==============================
-    // Проверка сервера
-    // ==============================
+    // ==========================================
+    // Главная
+    // ==========================================
 
     if (
         req.method === "GET" &&
         url.pathname === "/"
     ) {
-        send(
+        sendText(
             res,
             200,
-            "text/plain; charset=utf-8",
             "YOOMoney API работает 🚀"
         );
 
         return;
     }
 
-    // ==============================
-    // ЮMoney OAuth callback
-    // ==============================
+    // ==========================================
+    // OAuth callback
+    // ==========================================
 
     if (
         req.method === "GET" &&
@@ -114,105 +123,117 @@ const server = http.createServer(async (req, res) => {
         const error =
             url.searchParams.get("error");
 
-        // Пользователь отменил авторизацию
+        const errorDescription =
+            url.searchParams.get(
+                "error_description"
+            );
+
+        console.log(
+            "OAuth callback получен"
+        );
+
+        console.log(
+            "OAuth error:",
+            error || "нет"
+        );
+
+        console.log(
+            "OAuth error description:",
+            errorDescription || "нет"
+        );
+
+        // ЮMoney сообщил об ошибке
         if (error) {
-            send(
+            sendHTML(
                 res,
                 400,
-                "text/html; charset=utf-8",
                 `
-                <!DOCTYPE html>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width,
+        initial-scale=1.0"
+    >
+    <title>YOOMoney</title>
+</head>
 
-                <html lang="ru">
+<body style="
+    margin:0;
+    background:#000;
+    color:#fff;
+    font-family:-apple-system,
+    BlinkMacSystemFont,sans-serif;
+    text-align:center;
+    padding:60px 20px;
+">
 
-                <head>
-                    <meta charset="UTF-8">
-                    <meta
-                        name="viewport"
-                        content="width=device-width,
-                        initial-scale=1.0"
-                    >
-                    <title>YOOMoney</title>
-                </head>
+    <h1>Ошибка ЮMoney</h1>
 
-                <body style="
-                    margin:0;
-                    background:#000;
-                    color:#fff;
-                    font-family:
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    sans-serif;
-                    text-align:center;
-                    padding:60px 20px;
-                ">
+    <p style="
+        color:#aaa;
+        font-size:17px;
+    ">
+        ${error}
+    </p>
 
-                    <h1>
-                        Авторизация отменена
-                    </h1>
+    <p style="
+        color:#777;
+        font-size:14px;
+    ">
+        ${errorDescription || ""}
+    </p>
 
-                    <p style="
-                        color:#999;
-                        font-size:17px;
-                    ">
-                        Вы отменили вход через ЮMoney.
-                    </p>
-
-                </body>
-
-                </html>
+</body>
+</html>
                 `
             );
 
             return;
         }
 
-        // ЮMoney не прислал code
+        // Нет code
         if (!code) {
-            send(
+            console.log(
+                "OAuth code отсутствует"
+            );
+
+            sendHTML(
                 res,
                 400,
-                "text/html; charset=utf-8",
                 `
-                <!DOCTYPE html>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width,
+        initial-scale=1.0"
+    >
+    <title>YOOMoney</title>
+</head>
 
-                <html lang="ru">
+<body style="
+    margin:0;
+    background:#000;
+    color:#fff;
+    font-family:-apple-system,
+    BlinkMacSystemFont,sans-serif;
+    text-align:center;
+    padding:60px 20px;
+">
 
-                <head>
-                    <meta charset="UTF-8">
-                    <meta
-                        name="viewport"
-                        content="width=device-width,
-                        initial-scale=1.0"
-                    >
-                    <title>YOOMoney</title>
-                </head>
+    <h1>Код не получен</h1>
 
-                <body style="
-                    margin:0;
-                    background:#000;
-                    color:#fff;
-                    font-family:
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    sans-serif;
-                    text-align:center;
-                    padding:60px 20px;
-                ">
+    <p style="color:#aaa;">
+        ЮMoney не передал код авторизации.
+    </p>
 
-                    <h1>
-                        Ошибка авторизации
-                    </h1>
-
-                    <p style="
-                        color:#999;
-                    ">
-                        Код авторизации не получен.
-                    </p>
-
-                </body>
-
-                </html>
+</body>
+</html>
                 `
             );
 
@@ -221,171 +242,152 @@ const server = http.createServer(async (req, res) => {
 
         try {
             console.log(
-                "Получен OAuth authorization code"
+                "OAuth code получен"
             );
 
-            // Получаем access_token
-            const accessToken =
-                await getAccessToken(code);
-
-            // Никогда не выводим access_token
-            // в Render logs.
+            const tokenData =
+                await exchangeCode(code);
 
             console.log(
-                "ЮMoney: access token получен ✅"
+                "access_token успешно получен ✅"
             );
 
             /*
-             * Сейчас токен существует только
-             * внутри этого запроса.
+             * ВАЖНО:
              *
-             * Следующим этапом мы сделаем:
+             * Сам access_token здесь
+             * намеренно НЕ выводим.
              *
-             * access_token
-             *       ↓
-             * серверная сессия
-             *       ↓
-             * iPhone
-             *       ↓
-             * баланс
-             * история
+             * Следующим этапом сделаем
+             * серверную сессию пользователя.
              */
 
-            send(
+            sendHTML(
                 res,
                 200,
-                "text/html; charset=utf-8",
                 `
-                <!DOCTYPE html>
+<!DOCTYPE html>
+<html lang="ru">
 
-                <html lang="ru">
+<head>
+    <meta charset="UTF-8">
 
-                <head>
-                    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width,
+        initial-scale=1.0"
+    >
 
-                    <meta
-                        name="viewport"
-                        content="width=device-width,
-                        initial-scale=1.0"
-                    >
+    <title>YOOMoney</title>
+</head>
 
-                    <title>YOOMoney</title>
-                </head>
+<body style="
+    margin:0;
+    background:#000;
+    color:#fff;
+    font-family:-apple-system,
+    BlinkMacSystemFont,sans-serif;
+    text-align:center;
+    padding:60px 20px;
+">
 
-                <body style="
-                    margin:0;
-                    background:#000;
-                    color:#fff;
-                    font-family:
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    sans-serif;
-                    text-align:center;
-                    padding:60px 20px;
-                ">
+    <div style="
+        width:86px;
+        height:86px;
+        border-radius:25px;
+        background:#ff9500;
+        margin:0 auto 25px;
 
-                    <div style="
-                        width:80px;
-                        height:80px;
-                        background:#ff9500;
-                        border-radius:24px;
-                        margin:0 auto 25px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
 
-                        display:flex;
-                        align-items:center;
-                        justify-content:center;
+        font-size:42px;
+        font-weight:bold;
+    ">
+        ₽
+    </div>
 
-                        font-size:40px;
-                    ">
-                        ₽
-                    </div>
+    <h1>
+        Авторизация успешна ✅
+    </h1>
 
-                    <h1>
-                        Авторизация успешна ✅
-                    </h1>
+    <p style="
+        color:#aaa;
+        font-size:17px;
+    ">
+        Аккаунт ЮMoney успешно подключён.
+    </p>
 
-                    <p style="
-                        color:#999;
-                        font-size:17px;
-                        line-height:1.5;
-                    ">
-                        Ваш аккаунт ЮMoney успешно
-                        подключён к YOOMoney.
-                    </p>
+    <p style="
+        color:#666;
+        font-size:14px;
+    ">
+        Можно вернуться в приложение YOOMoney.
+    </p>
 
-                    <p style="
-                        color:#666;
-                        font-size:14px;
-                    ">
-                        Можно вернуться в приложение.
-                    </p>
+</body>
 
-                </body>
-
-                </html>
+</html>
                 `
             );
 
-        } catch (error) {
+        } catch (err) {
             console.error(
-                "OAuth error:",
-                error.message
+                "OAuth token error:",
+                err.message
             );
 
-            send(
+            sendHTML(
                 res,
                 500,
-                "text/html; charset=utf-8",
                 `
-                <!DOCTYPE html>
+<!DOCTYPE html>
+<html lang="ru">
 
-                <html lang="ru">
+<head>
+    <meta charset="UTF-8">
 
-                <head>
-                    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width,
+        initial-scale=1.0"
+    >
 
-                    <meta
-                        name="viewport"
-                        content="width=device-width,
-                        initial-scale=1.0"
-                    >
+    <title>YOOMoney</title>
+</head>
 
-                    <title>YOOMoney</title>
-                </head>
+<body style="
+    margin:0;
+    background:#000;
+    color:#fff;
+    font-family:-apple-system,
+    BlinkMacSystemFont,sans-serif;
+    text-align:center;
+    padding:60px 20px;
+">
 
-                <body style="
-                    margin:0;
-                    background:#000;
-                    color:#fff;
-                    font-family:
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    sans-serif;
-                    text-align:center;
-                    padding:60px 20px;
-                ">
+    <h1>
+        Не удалось получить токен
+    </h1>
 
-                    <h1>
-                        Не удалось войти
-                    </h1>
+    <p style="
+        color:#aaa;
+        font-size:17px;
+    ">
+        ${err.message}
+    </p>
 
-                    <p style="
-                        color:#999;
-                        font-size:17px;
-                    ">
-                        ЮMoney не подтвердил авторизацию.
-                    </p>
+    <p style="
+        color:#666;
+        font-size:14px;
+    ">
+        Попробуйте авторизоваться ещё раз.
+    </p>
 
-                    <p style="
-                        color:#666;
-                        font-size:14px;
-                    ">
-                        Попробуйте войти ещё раз.
-                    </p>
+</body>
 
-                </body>
-
-                </html>
+</html>
                 `
             );
         }
@@ -393,9 +395,9 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // ==============================
+    // ==========================================
     // Уведомления ЮMoney
-    // ==============================
+    // ==========================================
 
     if (
         req.method === "POST" &&
@@ -412,10 +414,9 @@ const server = http.createServer(async (req, res) => {
                 "Получено уведомление ЮMoney"
             );
 
-            send(
+            sendText(
                 res,
                 200,
-                "text/plain; charset=utf-8",
                 "OK"
             );
         });
@@ -423,14 +424,13 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // ==============================
+    // ==========================================
     // 404
-    // ==============================
+    // ==========================================
 
-    send(
+    sendText(
         res,
         404,
-        "text/plain; charset=utf-8",
         "Not Found"
     );
 });
